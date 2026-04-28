@@ -132,8 +132,10 @@ const zhData = {
 
 const dataByLang: Record<string, typeof enData> = { en: enData, zh: zhData }
 
-/** Get content data for a specific language (falls back to English) */
+/** Get content data for a specific language (falls back to English).
+ *  Accepts region-suffixed codes like 'zh-CN' / 'zh-TW' from browser detection. */
 export function getLocalizedData(lang: string) {
+  if (lang?.toLowerCase().startsWith('zh')) return zhData
   return dataByLang[lang] ?? enData
 }
 

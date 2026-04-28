@@ -52,9 +52,12 @@ function sectionHeader(title) {
 
 // ── Build site.json ──────────────────────────────────────────────
 
-function buildSiteJson(a) {
+function buildSiteJson(a, locale = 'en') {
+  const isZh = locale === 'zh'
   return {
-    _comment: 'Your basic info. Edit the values below, then run: npm run dev',
+    _comment: isZh
+      ? '中文版站点配置。修改下面的值后运行：npm run dev'
+      : 'Your basic info. Edit the values below, then run: npm run dev',
 
     name: {
       full: a.fullName,
@@ -65,18 +68,20 @@ function buildSiteJson(a) {
       authorVariants: [a.fullName],
     },
 
-    title: `Hi there, I'm ${a.fullName}`,
+    title: isZh ? `你好，我是 ${a.fullName}` : `Hi there, I'm ${a.fullName}`,
     avatar: a.avatar,
 
     terminal: {
       username: a.terminalUser,
-      rotatingSubtitles: [
-        'build cool projects',
-        'write some code',
-        'explore AI research',
-        'share knowledge',
-        'learn new things',
-      ],
+      rotatingSubtitles: isZh
+        ? ['做一些酷项目', '写点代码', '探索 AI 研究', '分享知识', '学习新东西']
+        : [
+            'build cool projects',
+            'write some code',
+            'explore AI research',
+            'share knowledge',
+            'learn new things',
+          ],
       skills: [
         'Python', 'TypeScript', 'Go', 'PyTorch',
         'React', 'ROS2', 'Docker', 'Kubernetes',
@@ -170,16 +175,20 @@ async function main() {
     terminalUser, avatar,
   }
 
-  // ── Write content/site.json ─────────────────────────────────
+  // ── Write content/site.json (English) and content/zh/site.json (Chinese) ─
   const contentDir = path.join(ROOT, 'content')
+  const contentDirZh = path.join(contentDir, 'zh')
   fs.mkdirSync(contentDir, { recursive: true })
+  fs.mkdirSync(contentDirZh, { recursive: true })
 
   const configPath = path.join(contentDir, 'site.json')
-  const configContent = JSON.stringify(buildSiteJson(answers), null, 2) + '\n'
-  fs.writeFileSync(configPath, configContent, 'utf-8')
+  const configPathZh = path.join(contentDirZh, 'site.json')
+  fs.writeFileSync(configPath, JSON.stringify(buildSiteJson(answers, 'en'), null, 2) + '\n', 'utf-8')
+  fs.writeFileSync(configPathZh, JSON.stringify(buildSiteJson(answers, 'zh'), null, 2) + '\n', 'utf-8')
 
   console.log()
   console.log(`  [ok] Generated ${path.relative(ROOT, configPath)}`)
+  console.log(`  [ok] Generated ${path.relative(ROOT, configPathZh)}`)
 
   // ── Create .env from .env.example if needed ───────────────────
   const envPath = path.join(ROOT, '.env')

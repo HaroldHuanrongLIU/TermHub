@@ -18,9 +18,9 @@ import siteJsonZh from '@content/zh/site.json'
 export const siteConfig = siteJson
 export const siteConfigZh = siteJsonZh
 
-/** Get site config for a given language */
+/** Get site config for a given language. Accepts region-suffixed codes (zh-CN, zh-TW, ...). */
 export function getLocalizedSiteConfig(lang: string) {
-  return lang === 'zh' ? siteConfigZh : siteJson
+  return lang?.toLowerCase().startsWith('zh') ? siteConfigZh : siteJson
 }
 
 // ═══════════════════════════════════════════════════════════════

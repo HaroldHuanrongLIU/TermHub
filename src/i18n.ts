@@ -17,6 +17,9 @@ i18n
       zh: { translation: zh },
     },
     fallbackLng: 'en',
+    supportedLngs: ['en', 'zh'],
+    load: 'languageOnly',
+    nonExplicitSupportedLngs: true,
     interpolation: {
       escapeValue: false,
     },

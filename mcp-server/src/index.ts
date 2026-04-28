@@ -23,10 +23,17 @@ let devServerProcess: ChildProcess | null = null;
 // ── Language support ────────────────────────────────────────────────
 
 const LanguageEnum = z.enum(["en", "zh"]).default("en").describe(
-  "Content language. 'en' writes to content/, 'zh' writes to content/zh/"
+  "Content language. 'en' reads/writes content/, 'zh' reads/writes content/zh/"
+);
+
+const WriteLanguageEnum = z.enum(["en", "zh", "both"]).default("en").describe(
+  "Content language for write operations. 'en' writes content/, 'zh' writes content/zh/, " +
+    "'both' writes the same data to both directories — use this for fields that are identical " +
+    "across languages (name, email, social links, github/linkedin URLs)."
 );
 
 type Language = "en" | "zh";
+type WriteLanguage = "en" | "zh" | "both";
 
 function getContentDir(language: Language = "en"): string {
   return language === "zh" ? path.join(CONTENT_DIR, "zh") : CONTENT_DIR;
@@ -34,6 +41,12 @@ function getContentDir(language: Language = "en"): string {
 
 function getContentRelPath(language: Language, filename: string): string {
   return language === "zh" ? `content/zh/${filename}` : `content/${filename}`;
+}
+
+/** Resolve a write-language spec into the concrete list of target locales. */
+function resolveWriteLanguages(language: WriteLanguage = "en"): Language[] {
+  if (language === "both") return ["en", "zh"];
+  return [language];
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
@@ -341,24 +354,27 @@ server.tool(
 server.tool(
   "write_json_content",
   "Write or update a JSON content file (site.json, experience.json, news.json, awards.json, research.json, logos.json). " +
-    "Use language='zh' to write Chinese version to content/zh/.",
+    "Use language='zh' to write Chinese version, or language='both' to write the same data to both EN and ZH.",
   {
     file_name: ContentTypeEnum.describe("Which JSON content file to write"),
     data: z.string().describe("JSON string of the data to write"),
-    language: LanguageEnum,
+    language: WriteLanguageEnum,
   },
   async ({ file_name, data, language }) => {
     try {
-      const lang = language as Language;
+      const targets = resolveWriteLanguages(language as WriteLanguage);
       const parsed = JSON.parse(data);
-      const contentDir = getContentDir(lang);
-      const filePath = path.join(contentDir, `${file_name}.json`);
-      writeJson(filePath, parsed);
+      const written: string[] = [];
+      for (const lang of targets) {
+        const filePath = path.join(getContentDir(lang), `${file_name}.json`);
+        writeJson(filePath, parsed);
+        written.push(getContentRelPath(lang, `${file_name}.json`));
+      }
       return {
         content: [
           {
             type: "text" as const,
-            text: `Successfully wrote ${getContentRelPath(lang, `${file_name}.json`)}`,
+            text: `Successfully wrote ${written.join(", ")}`,
           },
         ],
       };
@@ -382,7 +398,9 @@ server.tool(
   "write_markdown_content",
   "Write or update a Markdown content file with YAML frontmatter. " +
     "For projects/publications/articles, specify the category and a slug for the filename. " +
-    "For about.md, use category='about'. Use language='zh' to write Chinese version.",
+    "For about.md, use category='about'. Use language='zh' for Chinese, or language='both' " +
+    "to write identical content to both EN and ZH (typically you'll want to write each language " +
+    "separately with translated body — use 'both' only when content is intentionally identical).",
   {
     category: MarkdownCategoryEnum.describe("Content category folder"),
     slug: z
@@ -391,30 +409,32 @@ server.tool(
       .describe("Filename slug (without .md). Auto-generated from title if omitted. Ignored for 'about'."),
     frontmatter: z.string().describe("JSON string of YAML frontmatter fields"),
     body: z.string().describe("Markdown body content"),
-    language: LanguageEnum,
+    language: WriteLanguageEnum,
   },
   async ({ category, slug, frontmatter, body, language }) => {
     try {
-      const lang = language as Language;
-      const contentDir = getContentDir(lang);
+      const targets = resolveWriteLanguages(language as WriteLanguage);
       const fm = JSON.parse(frontmatter) as Record<string, unknown>;
+      const written: string[] = [];
 
-      let filePath: string;
-      if (category === "about") {
-        filePath = path.join(contentDir, "about.md");
-      } else {
-        const fileName = slug || slugify(String(fm.title || "untitled"));
-        filePath = path.join(contentDir, category, `${fileName}.md`);
+      for (const lang of targets) {
+        const contentDir = getContentDir(lang);
+        let filePath: string;
+        if (category === "about") {
+          filePath = path.join(contentDir, "about.md");
+        } else {
+          const fileName = slug || slugify(String(fm.title || "untitled"));
+          filePath = path.join(contentDir, category, `${fileName}.md`);
+        }
+        writeMarkdownFile(filePath, fm, body);
+        const relPath = lang === "zh"
+          ? `content/zh/${path.relative(contentDir, filePath)}`
+          : `content/${path.relative(contentDir, filePath)}`;
+        written.push(relPath);
       }
-
-      writeMarkdownFile(filePath, fm, body);
-
-      const relPath = lang === "zh"
-        ? `content/zh/${path.relative(contentDir, filePath)}`
-        : `content/${path.relative(contentDir, filePath)}`;
       return {
         content: [
-          { type: "text" as const, text: `Successfully wrote ${relPath}` },
+          { type: "text" as const, text: `Successfully wrote ${written.join(", ")}` },
         ],
       };
     } catch (e) {
@@ -435,26 +455,36 @@ server.tool(
 
 server.tool(
   "delete_content",
-  "Delete a content file from TermHub. Use language='zh' for Chinese content.",
+  "Delete a content file from TermHub. Use language='zh' for Chinese content, " +
+    "or language='both' to delete from both EN and ZH directories.",
   {
     file_path: z
       .string()
       .describe("Relative path within content/ directory, e.g. 'projects/old-project.md'"),
-    language: LanguageEnum,
+    language: WriteLanguageEnum,
   },
   async ({ file_path, language }) => {
-    const lang = language as Language;
-    const contentDir = getContentDir(lang);
-    const fullPath = path.join(contentDir, file_path);
-    if (!fs.existsSync(fullPath)) {
+    const targets = resolveWriteLanguages(language as WriteLanguage);
+    const deleted: string[] = [];
+    const missing: string[] = [];
+    for (const lang of targets) {
+      const fullPath = path.join(getContentDir(lang), file_path);
+      if (fs.existsSync(fullPath)) {
+        fs.unlinkSync(fullPath);
+        deleted.push(getContentRelPath(lang, file_path));
+      } else {
+        missing.push(getContentRelPath(lang, file_path));
+      }
+    }
+    if (deleted.length === 0) {
       return {
-        content: [{ type: "text" as const, text: `File not found: ${getContentRelPath(lang, file_path)}` }],
+        content: [{ type: "text" as const, text: `File not found: ${missing.join(", ")}` }],
         isError: true,
       };
     }
-    fs.unlinkSync(fullPath);
+    const note = missing.length ? ` (skipped missing: ${missing.join(", ")})` : "";
     return {
-      content: [{ type: "text" as const, text: `Deleted ${getContentRelPath(lang, file_path)}` }],
+      content: [{ type: "text" as const, text: `Deleted ${deleted.join(", ")}${note}` }],
     };
   }
 );
@@ -465,19 +495,15 @@ server.tool(
   "update_site_config",
   "Update specific fields in site.json without overwriting the entire file. " +
     "Accepts a partial JSON object that will be deep-merged with existing config. " +
-    "Use language='zh' to update the Chinese site config.",
+    "Use language='zh' to update the Chinese site config, or language='both' to apply the same " +
+    "patch to both EN and ZH (recommended for shared fields like contact, social, name, github URL).",
   {
     updates: z.string().describe("JSON string of fields to merge into site.json"),
-    language: LanguageEnum,
+    language: WriteLanguageEnum,
   },
   async ({ updates, language }) => {
     try {
-      const lang = language as Language;
-      const contentDir = getContentDir(lang);
-      const siteJsonPath = path.join(contentDir, "site.json");
-      const existing = fs.existsSync(siteJsonPath)
-        ? (readJson(siteJsonPath) as Record<string, unknown>)
-        : {};
+      const targets = resolveWriteLanguages(language as WriteLanguage);
       const patch = JSON.parse(updates) as Record<string, unknown>;
 
       // Deep merge
@@ -503,14 +529,21 @@ server.tool(
         return result;
       }
 
-      const merged = deepMerge(existing, patch);
-      writeJson(siteJsonPath, merged);
+      const written: string[] = [];
+      for (const lang of targets) {
+        const siteJsonPath = path.join(getContentDir(lang), "site.json");
+        const existing = fs.existsSync(siteJsonPath)
+          ? (readJson(siteJsonPath) as Record<string, unknown>)
+          : {};
+        writeJson(siteJsonPath, deepMerge(existing, patch));
+        written.push(getContentRelPath(lang, "site.json"));
+      }
 
       return {
         content: [
           {
             type: "text" as const,
-            text: `Successfully updated ${getContentRelPath(lang, "site.json")}. Updated fields: ${Object.keys(patch).join(", ")}`,
+            text: `Successfully updated ${written.join(", ")}. Updated fields: ${Object.keys(patch).join(", ")}`,
           },
         ],
       };
@@ -533,7 +566,8 @@ server.tool(
 server.tool(
   "add_publication",
   "Add a single publication entry as a Markdown file. " +
-    "Use language='zh' to add Chinese version to content/zh/publications/.",
+    "Use language='zh' for Chinese, or language='both' to write the same entry to both EN and ZH " +
+    "(useful when title/authors/venue are language-agnostic and abstract is empty or shared).",
   {
     id: z.string().describe("Unique publication ID, e.g. 'acl2025-my-paper'"),
     title: z.string().describe("Paper title"),
@@ -557,11 +591,10 @@ server.tool(
       .describe("Related links"),
     emoji: z.string().optional().describe("Display emoji"),
     keywords: z.array(z.string()).optional().describe("Keywords"),
-    language: LanguageEnum,
+    language: WriteLanguageEnum,
   },
   async (params) => {
-    const lang = params.language as Language;
-    const contentDir = getContentDir(lang);
+    const targets = resolveWriteLanguages(params.language as WriteLanguage);
 
     const frontmatter: Record<string, unknown> = {
       id: params.id,
@@ -586,15 +619,18 @@ server.tool(
 
     const body = params.abstract || "";
     const slug = slugify(params.id);
-    const filePath = path.join(contentDir, "publications", `${slug}.md`);
-
-    writeMarkdownFile(filePath, frontmatter, body);
+    const written: string[] = [];
+    for (const lang of targets) {
+      const filePath = path.join(getContentDir(lang), "publications", `${slug}.md`);
+      writeMarkdownFile(filePath, frontmatter, body);
+      written.push(getContentRelPath(lang, `publications/${slug}.md`));
+    }
 
     return {
       content: [
         {
           type: "text" as const,
-          text: `Added publication: ${getContentRelPath(lang, `publications/${slug}.md`)}`,
+          text: `Added publication: ${written.join(", ")}`,
         },
       ],
     };
@@ -606,7 +642,8 @@ server.tool(
 server.tool(
   "add_project",
   "Add a single project entry as a Markdown file. " +
-    "Use language='zh' to add Chinese version to content/zh/projects/.",
+    "Use language='zh' for Chinese, or language='both' to write identical content to both " +
+    "(typically prefer per-language calls with translated summary/highlights).",
   {
     title: z.string().describe("Project title"),
     category: ProjectCategoryEnum.describe("Project category"),
@@ -618,11 +655,10 @@ server.tool(
     badge: z.string().optional().describe("Display badge text"),
     highlights: z.array(z.string()).optional().describe("Key highlights as bullet points"),
     slug: z.string().optional().describe("Filename slug (auto-generated from title if omitted)"),
-    language: LanguageEnum,
+    language: WriteLanguageEnum,
   },
   async (params) => {
-    const lang = params.language as Language;
-    const contentDir = getContentDir(lang);
+    const targets = resolveWriteLanguages(params.language as WriteLanguage);
 
     const frontmatter: Record<string, unknown> = {
       title: params.title,
@@ -644,15 +680,18 @@ server.tool(
     }
 
     const fileName = params.slug || slugify(params.title);
-    const filePath = path.join(contentDir, "projects", `${fileName}.md`);
-
-    writeMarkdownFile(filePath, frontmatter, body);
+    const written: string[] = [];
+    for (const lang of targets) {
+      const filePath = path.join(getContentDir(lang), "projects", `${fileName}.md`);
+      writeMarkdownFile(filePath, frontmatter, body);
+      written.push(getContentRelPath(lang, `projects/${fileName}.md`));
+    }
 
     return {
       content: [
         {
           type: "text" as const,
-          text: `Added project: ${getContentRelPath(lang, `projects/${fileName}.md`)}`,
+          text: `Added project: ${written.join(", ")}`,
         },
       ],
     };
@@ -664,7 +703,8 @@ server.tool(
 server.tool(
   "add_experience",
   "Add a timeline entry to experience.json. " +
-    "Use language='zh' to add to Chinese content.",
+    "Use language='zh' for Chinese, or language='both' to add the same entry to both EN and ZH " +
+    "(useful when the entry is language-agnostic; otherwise call per-language with translated text).",
   {
     title: z.string().describe("Job/position title"),
     company: z.string().describe("Company or organization name"),
@@ -677,17 +717,10 @@ server.tool(
     summary: z.string().optional().describe("Brief summary"),
     highlights: z.array(z.string()).describe("Key achievements"),
     is_current: z.boolean().optional().describe("Whether this is a current position"),
-    language: LanguageEnum,
+    language: WriteLanguageEnum,
   },
   async (params) => {
-    const lang = params.language as Language;
-    const contentDir = getContentDir(lang);
-    const expPath = path.join(contentDir, "experience.json");
-    const existing = fs.existsSync(expPath)
-      ? (readJson(expPath) as Record<string, unknown>)
-      : { education: { courses: [] }, reviewing: [], timeline: [] };
-
-    const timeline = (existing.timeline as unknown[]) || [];
+    const targets = resolveWriteLanguages(params.language as WriteLanguage);
 
     const entry: Record<string, unknown> = {
       title: params.title,
@@ -704,15 +737,24 @@ server.tool(
     if (params.summary) entry.summary = params.summary;
     if (params.is_current) entry.isCurrent = true;
 
-    timeline.push(entry);
-    existing.timeline = timeline;
-    writeJson(expPath, existing);
+    const written: string[] = [];
+    for (const lang of targets) {
+      const expPath = path.join(getContentDir(lang), "experience.json");
+      const existing = fs.existsSync(expPath)
+        ? (readJson(expPath) as Record<string, unknown>)
+        : { education: { courses: [] }, reviewing: [], timeline: [] };
+      const timeline = (existing.timeline as unknown[]) || [];
+      timeline.push({ ...entry });
+      existing.timeline = timeline;
+      writeJson(expPath, existing);
+      written.push(lang);
+    }
 
     return {
       content: [
         {
           type: "text" as const,
-          text: `Added experience entry (${lang}): ${params.title} at ${params.company}`,
+          text: `Added experience entry (${written.join(", ")}): ${params.title} at ${params.company}`,
         },
       ],
     };
@@ -724,37 +766,38 @@ server.tool(
 server.tool(
   "add_education",
   "Add an education entry to experience.json. " +
-    "Use language='zh' to add to Chinese content.",
+    "Use language='zh' for Chinese, or language='both' to add the same entry to both EN and ZH.",
   {
     course: z.string().describe("Degree or course name, e.g. 'M.S. Computer Science'"),
     institution: z.string().describe("Institution name"),
     year: z.string().describe("Year range, e.g. '2022-2024'"),
-    language: LanguageEnum,
+    language: WriteLanguageEnum,
   },
   async (params) => {
-    const lang = params.language as Language;
-    const contentDir = getContentDir(lang);
-    const expPath = path.join(contentDir, "experience.json");
-    const existing = fs.existsSync(expPath)
-      ? (readJson(expPath) as Record<string, unknown>)
-      : { education: { courses: [] }, reviewing: [], timeline: [] };
-
-    const education = (existing.education as Record<string, unknown>) || { courses: [] };
-    const courses = (education.courses as unknown[]) || [];
-    courses.push({
-      course: params.course,
-      institution: params.institution,
-      year: params.year,
-    });
-    education.courses = courses;
-    existing.education = education;
-    writeJson(expPath, existing);
-
+    const targets = resolveWriteLanguages(params.language as WriteLanguage);
+    const written: string[] = [];
+    for (const lang of targets) {
+      const expPath = path.join(getContentDir(lang), "experience.json");
+      const existing = fs.existsSync(expPath)
+        ? (readJson(expPath) as Record<string, unknown>)
+        : { education: { courses: [] }, reviewing: [], timeline: [] };
+      const education = (existing.education as Record<string, unknown>) || { courses: [] };
+      const courses = (education.courses as unknown[]) || [];
+      courses.push({
+        course: params.course,
+        institution: params.institution,
+        year: params.year,
+      });
+      education.courses = courses;
+      existing.education = education;
+      writeJson(expPath, existing);
+      written.push(lang);
+    }
     return {
       content: [
         {
           type: "text" as const,
-          text: `Added education (${lang}): ${params.course} at ${params.institution}`,
+          text: `Added education (${written.join(", ")}): ${params.course} at ${params.institution}`,
         },
       ],
     };
@@ -765,7 +808,8 @@ server.tool(
 
 server.tool(
   "add_news",
-  "Add a news item to news.json. Use language='zh' to add to Chinese content.",
+  "Add a news item to news.json. Use language='zh' for Chinese, " +
+    "or language='both' to add the same item to both EN and ZH.",
   {
     type: z.string().describe("News type: publication, talk, release, award, etc."),
     badge: z.string().describe("Badge label displayed on the news item"),
@@ -785,13 +829,10 @@ server.tool(
       )
       .optional()
       .describe("Related links"),
-    language: LanguageEnum,
+    language: WriteLanguageEnum,
   },
   async (params) => {
-    const lang = params.language as Language;
-    const contentDir = getContentDir(lang);
-    const newsPath = path.join(contentDir, "news.json");
-    const existing = fs.existsSync(newsPath) ? (readJson(newsPath) as unknown[]) : [];
+    const targets = resolveWriteLanguages(params.language as WriteLanguage);
 
     const item: Record<string, unknown> = {
       type: params.type,
@@ -807,12 +848,18 @@ server.tool(
     if (params.links) item.links = params.links;
     else item.links = [];
 
-    existing.unshift(item); // Add to top (newest first)
-    writeJson(newsPath, existing);
+    const written: string[] = [];
+    for (const lang of targets) {
+      const newsPath = path.join(getContentDir(lang), "news.json");
+      const existing = fs.existsSync(newsPath) ? (readJson(newsPath) as unknown[]) : [];
+      existing.unshift({ ...item });
+      writeJson(newsPath, existing);
+      written.push(lang);
+    }
 
     return {
       content: [
-        { type: "text" as const, text: `Added news item (${lang}): ${params.title}` },
+        { type: "text" as const, text: `Added news item (${written.join(", ")}): ${params.title}` },
       ],
     };
   }
@@ -822,7 +869,8 @@ server.tool(
 
 server.tool(
   "add_award",
-  "Add an award/honor to awards.json. Use language='zh' to add to Chinese content.",
+  "Add an award/honor to awards.json. Use language='zh' for Chinese, " +
+    "or language='both' to add the same award to both EN and ZH.",
   {
     title: z.string().describe("Award title"),
     org: z.string().optional().describe("Awarding organization"),
@@ -832,13 +880,10 @@ server.tool(
       .optional()
       .describe("Award type"),
     link: z.string().optional().describe("Link URL"),
-    language: LanguageEnum,
+    language: WriteLanguageEnum,
   },
   async (params) => {
-    const lang = params.language as Language;
-    const contentDir = getContentDir(lang);
-    const awardsPath = path.join(contentDir, "awards.json");
-    const existing = fs.existsSync(awardsPath) ? (readJson(awardsPath) as unknown[]) : [];
+    const targets = resolveWriteLanguages(params.language as WriteLanguage);
 
     const item: Record<string, unknown> = {
       title: params.title,
@@ -848,12 +893,18 @@ server.tool(
     if (params.kind) item.kind = params.kind;
     if (params.link) item.link = params.link;
 
-    existing.unshift(item);
-    writeJson(awardsPath, existing);
+    const written: string[] = [];
+    for (const lang of targets) {
+      const awardsPath = path.join(getContentDir(lang), "awards.json");
+      const existing = fs.existsSync(awardsPath) ? (readJson(awardsPath) as unknown[]) : [];
+      existing.unshift({ ...item });
+      writeJson(awardsPath, existing);
+      written.push(lang);
+    }
 
     return {
       content: [
-        { type: "text" as const, text: `Added award (${lang}): ${params.title}` },
+        { type: "text" as const, text: `Added award (${written.join(", ")}): ${params.title}` },
       ],
     };
   }
@@ -863,7 +914,8 @@ server.tool(
 
 server.tool(
   "add_talk",
-  "Add a talk/presentation to talks.json. Use language='zh' to add to Chinese content.",
+  "Add a talk/presentation to talks.json. Use language='zh' for Chinese, " +
+    "or language='both' to add the same talk to both EN and ZH.",
   {
     title: z.string().describe("Talk title"),
     event: z.string().describe("Event/conference name"),
@@ -873,13 +925,10 @@ server.tool(
     description: z.string().optional().describe("Short description"),
     slides_url: z.string().optional().describe("URL to slides"),
     video_url: z.string().optional().describe("URL to video recording"),
-    language: LanguageEnum,
+    language: WriteLanguageEnum,
   },
   async (params) => {
-    const lang = params.language as Language;
-    const contentDir = getContentDir(lang);
-    const talksPath = path.join(contentDir, "talks.json");
-    const existing = fs.existsSync(talksPath) ? (readJson(talksPath) as unknown[]) : [];
+    const targets = resolveWriteLanguages(params.language as WriteLanguage);
 
     const item: Record<string, unknown> = {
       title: params.title,
@@ -892,12 +941,18 @@ server.tool(
     if (params.slides_url) item.slidesUrl = params.slides_url;
     if (params.video_url) item.videoUrl = params.video_url;
 
-    existing.unshift(item);
-    writeJson(talksPath, existing);
+    const written: string[] = [];
+    for (const lang of targets) {
+      const talksPath = path.join(getContentDir(lang), "talks.json");
+      const existing = fs.existsSync(talksPath) ? (readJson(talksPath) as unknown[]) : [];
+      existing.unshift({ ...item });
+      writeJson(talksPath, existing);
+      written.push(lang);
+    }
 
     return {
       content: [
-        { type: "text" as const, text: `Added talk (${lang}): ${params.title}` },
+        { type: "text" as const, text: `Added talk (${written.join(", ")}): ${params.title}` },
       ],
     };
   }
@@ -907,7 +962,8 @@ server.tool(
 
 server.tool(
   "add_teaching",
-  "Add a teaching entry to teaching.json. Use language='zh' to add to Chinese content.",
+  "Add a teaching entry to teaching.json. Use language='zh' for Chinese, " +
+    "or language='both' to add the same entry to both EN and ZH.",
   {
     course: z.string().describe("Course name"),
     institution: z.string().describe("Institution name"),
@@ -915,13 +971,10 @@ server.tool(
     role: z.enum(["instructor", "ta", "guest-lecturer", "co-instructor", "other"]).describe("Role"),
     description: z.string().optional().describe("Short description"),
     link: z.string().optional().describe("Link to course page"),
-    language: LanguageEnum,
+    language: WriteLanguageEnum,
   },
   async (params) => {
-    const lang = params.language as Language;
-    const contentDir = getContentDir(lang);
-    const teachingPath = path.join(contentDir, "teaching.json");
-    const existing = fs.existsSync(teachingPath) ? (readJson(teachingPath) as unknown[]) : [];
+    const targets = resolveWriteLanguages(params.language as WriteLanguage);
 
     const item: Record<string, unknown> = {
       course: params.course,
@@ -932,12 +985,18 @@ server.tool(
     if (params.description) item.description = params.description;
     if (params.link) item.link = params.link;
 
-    existing.unshift(item);
-    writeJson(teachingPath, existing);
+    const written: string[] = [];
+    for (const lang of targets) {
+      const teachingPath = path.join(getContentDir(lang), "teaching.json");
+      const existing = fs.existsSync(teachingPath) ? (readJson(teachingPath) as unknown[]) : [];
+      existing.unshift({ ...item });
+      writeJson(teachingPath, existing);
+      written.push(lang);
+    }
 
     return {
       content: [
-        { type: "text" as const, text: `Added teaching entry (${lang}): ${params.course}` },
+        { type: "text" as const, text: `Added teaching entry (${written.join(", ")}): ${params.course}` },
       ],
     };
   }
@@ -1021,25 +1080,32 @@ server.tool(
     }
 
     // Build the extraction blueprint
+    const isBilingual = params.languages.includes("zh");
     const blueprint = {
       instructions:
         "Below is a structured blueprint extracted from the resume. " +
         "Use the individual TermHub MCP tools (update_site_config, add_publication, " +
         "add_project, add_experience, add_education, write_markdown_content, etc.) " +
-        "to populate each section. All tools accept a 'language' parameter. " +
-        (params.languages.includes("zh")
-          ? "IMPORTANT: Generate content for BOTH English (language='en') and Chinese (language='zh'). " +
-            "For Chinese content, translate all user-facing text (titles, descriptions, highlights) to Chinese. " +
-            "Keep technical terms, venue names, and proper nouns in English."
+        "to populate each section. All write tools accept a 'language' parameter " +
+        "with values 'en', 'zh', or 'both'. " +
+        (isBilingual
+          ? "IMPORTANT: Generate content for BOTH English and Chinese. " +
+            "STRATEGY: For language-agnostic fields (contact email, social URLs, github/linkedin, " +
+            "name, dates) use language='both' to write to EN and ZH in a single call. " +
+            "For user-facing prose (titles, descriptions, abstracts, highlights, summaries) call " +
+            "tools twice: once with language='en' (English) and once with language='zh' (translated). " +
+            "Keep technical terms, venue names, and proper nouns in English even in Chinese content."
           : "The resume text is included for reference."),
 
       target_languages: params.languages,
 
       site_config: {
         tool: "update_site_config",
-        note: params.languages.includes("zh")
-          ? "Call update_site_config twice: once with language='en' and once with language='zh'. " +
-            "Chinese site.json can have translated title, rotating subtitles, etc."
+        note: isBilingual
+          ? "Recommended: call update_site_config with language='both' for shared fields " +
+            "(contact, social, name, avatar, terminal.username, terminal.timezone), then call " +
+            "again with language='en' / language='zh' separately for localized fields " +
+            "(title, terminal.rotatingSubtitles, terminal.skills if translated)."
           : undefined,
         suggested_data: {
           template: "terminal",

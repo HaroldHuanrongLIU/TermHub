@@ -232,6 +232,7 @@ React 18 · TypeScript 5 · Vite 5 · Chakra UI · Framer Motion · Nord Palette
 
 ## Changelog
 
+- `2026-04-28` **v1.2.1** — Bilingual experience polish: setup wizard, MCP tools, and browser language detection now keep English and Chinese content in sync out of the box
 - `2026-03-15` **v1.2.0** — Built-in English / Chinese bilingual support with language switcher and auto detection
 - `2026-03-15` **v1.1.0** — Added MCP server with 19 tools for AI-powered portfolio generation
 - `2026-03-14` **v1.0.0** — Initial release with publications, projects, experience, articles, awards, and news
